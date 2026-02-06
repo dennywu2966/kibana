@@ -20,6 +20,7 @@ import type {
   BaseAuthenticationProvider,
 } from './providers';
 import {
+  AliyunAuthenticationProvider,
   AnonymousAuthenticationProvider,
   BasicAuthenticationProvider,
   HTTPAuthenticationProvider,
@@ -121,6 +122,7 @@ const providerMap = new Map<
     providerSpecificOptions?: AuthenticationProviderSpecificOptions
   ) => BaseAuthenticationProvider
 >([
+  [AliyunAuthenticationProvider.type, AliyunAuthenticationProvider],
   [BasicAuthenticationProvider.type, BasicAuthenticationProvider],
   [KerberosAuthenticationProvider.type, KerberosAuthenticationProvider],
   [SAMLAuthenticationProvider.type, SAMLAuthenticationProvider],

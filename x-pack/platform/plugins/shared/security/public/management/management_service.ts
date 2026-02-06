@@ -17,6 +17,7 @@ import type {
 import type { AuthenticationServiceSetup } from '@kbn/security-plugin-types-public';
 
 import { apiKeysManagementApp } from './api_keys';
+import { aliyunRoleMappingsManagementApp } from './aliyun_role_mappings';
 import { roleMappingsManagementApp } from './role_mappings';
 import { rolesManagementApp } from './roles';
 import { usersManagementApp } from './users';
@@ -76,6 +77,9 @@ export class ManagementService {
     if (this.roleMappingManagementEnabled) {
       this.securitySection.registerApp(roleMappingsManagementApp.create({ getStartServices }));
     }
+
+    // Always register Aliyun role mappings (not controlled by serverless flag)
+    this.securitySection.registerApp(aliyunRoleMappingsManagementApp.create({ getStartServices }));
   }
 
   start({ capabilities }: StartParams) {
@@ -84,6 +88,7 @@ export class ManagementService {
 
       const securityManagementAppsStatuses: Array<[ManagementApp, boolean]> = [
         [securitySection.getApp(apiKeysManagementApp.id)!, features.showLinks],
+        [securitySection.getApp(aliyunRoleMappingsManagementApp.id)!, true],
       ];
 
       if (this.userManagementEnabled) {

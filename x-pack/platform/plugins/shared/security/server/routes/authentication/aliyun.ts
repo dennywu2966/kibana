@@ -5,6 +5,7 @@
  * 2.0.
  */
 
+import { parseNextURL } from '@kbn/std';
 import { schema } from '@kbn/config-schema';
 
 import type { RouteDefinitionParams } from '..';
@@ -16,6 +17,8 @@ import { createLicensedRouteHandler } from '../licensed_route_handler';
  */
 export function defineAliyunRoutes({
   router,
+  getAuthenticationService,
+  basePath,
 }: RouteDefinitionParams) {
   router.post(
     {
@@ -33,6 +36,7 @@ export function defineAliyunRoutes({
       validate: {
         body: schema.object({
           signedToken: schema.string(),
+          currentURL: schema.string(),
         }),
       },
       options: {
@@ -41,9 +45,10 @@ export function defineAliyunRoutes({
     },
     createLicensedRouteHandler(async (context, request, response) => {
       try {
-        const { signedToken } = request.body;
+        const { signedToken, currentURL } = request.body;
+        const redirectURL = parseNextURL(currentURL, basePath.serverBasePath);
 
-        // Call ES with X-ES-IAM-Signed header
+        // Call ES with X-ES-IAM-Signed header to authenticate
         const esClient = await context.core.elasticsearch.client;
         const authResponse = await esClient.asCurrentUser.transport.request({
           method: 'GET',
@@ -53,11 +58,27 @@ export function defineAliyunRoutes({
           },
         });
 
-        return response.ok({
-          body: {
-            username: authResponse.username,
-            roles: authResponse.roles,
+        // Now establish Kibana session using the authentication service
+        // We'll pass the authentication info to the Aliyun provider
+        const authenticationResult = await getAuthenticationService().login(request, {
+          provider: { name: 'aliyun' },
+          redirectURL,
+          value: {
+            signedToken,
+            authResponse,
           },
+        });
+
+        if (authenticationResult.redirected() || authenticationResult.succeeded()) {
+          return response.ok({
+            body: { location: authenticationResult.redirectURL || redirectURL },
+            headers: authenticationResult.authResponseHeaders,
+          });
+        }
+
+        return response.unauthorized({
+          body: authenticationResult.error,
+          headers: authenticationResult.authResponseHeaders,
         });
       } catch (error) {
         return response.customError(wrapIntoCustomErrorResponse(error));

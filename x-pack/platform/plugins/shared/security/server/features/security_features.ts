@@ -83,9 +83,24 @@ const roleMappingsManagementFeature: ElasticsearchFeatureConfig = {
   ],
 };
 
+const aliyunRoleMappingsFeature: ElasticsearchFeatureConfig = {
+  id: 'aliyun_role_mappings',
+  management: {
+    security: ['aliyun_role_mappings'],
+  },
+  catalogue: ['security'],
+  privileges: [
+    {
+      requiredClusterPrivileges: ['manage_security'],
+      ui: ['all'],
+    },
+  ],
+};
+
 export const securityFeatures = [
   userManagementFeature,
   rolesManagementFeature,
   apiKeysManagementFeature,
   roleMappingsManagementFeature,
+  aliyunRoleMappingsFeature,
 ];

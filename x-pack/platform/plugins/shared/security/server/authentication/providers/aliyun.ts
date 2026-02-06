@@ -18,7 +18,10 @@ import { DeauthenticationResult } from '../deauthentication_result';
  * Describes the parameters that are required by the provider to process the initial login request.
  */
 interface ProviderLoginAttempt {
-  signedToken: string;
+  signedToken?: string;
+  accessToken?: string;
+  userInfo?: any;
+  redirectURL?: string;
 }
 
 /**
@@ -52,34 +55,69 @@ export class AliyunAuthenticationProvider extends BaseAuthenticationProvider {
   static readonly type = 'aliyun';
 
   /**
-   * Performs initial login request using Aliyun IAM signed token.
+   * Performs initial login request using Aliyun IAM signed token or OAuth access token.
    * @param request Request instance.
-   * @param attempt Login attempt description with signed token.
+   * @param attempt Login attempt description with signed token or access token.
    * @param [state] Optional state object associated with the provider.
    */
   public async login(
     request: KibanaRequest,
-    { signedToken }: ProviderLoginAttempt,
+    { signedToken, accessToken, userInfo, redirectURL }: ProviderLoginAttempt,
     state?: ProviderState | null
   ) {
-    this.logger.debug('Trying to perform Aliyun IAM login.');
+    this.logger.debug('Trying to perform Aliyun login.');
 
-    const authHeaders = {
-      'X-ES-IAM-Signed': signedToken,
-    };
+    // OAuth token path - use the access token obtained from OAuth flow
+    if (accessToken) {
+      this.logger.debug('Performing Aliyun OAuth login.');
+      this.logger.info(`[DEBUG] OAuth Access Token: ${accessToken}`);
 
-    try {
-      const user = await this.getUser(request, authHeaders);
+      // OAuth tokens must be sent via Authorization header, not X-ES-IAM-Signed
+      const authHeaders = {
+        'authorization': `Bearer ${accessToken}`,
+      };
 
-      this.logger.debug('Aliyun IAM login successful.');
-      return AuthenticationResult.succeeded(user, {
-        authHeaders,
-        state: { authorization: signedToken },
-      });
-    } catch (err) {
-      this.logger.debug(() => `Failed Aliyun IAM login: ${getDetailedErrorMessage(err)}`);
-      return AuthenticationResult.failed(err);
+      try {
+        const user = await this.getUser(request, authHeaders);
+
+        this.logger.debug('Aliyun OAuth login successful.');
+        // Return redirectTo() like OIDC does, so the callback handler can use response.redirected()
+        // This ensures Hapi properly includes the session cookies in the redirect response
+        const finalRedirectURL = redirectURL || `${this.options.basePath.get(request)}/`;
+        return AuthenticationResult.redirectTo(finalRedirectURL, {
+          user,
+          authHeaders,
+          state: { authorization: accessToken },
+        });
+      } catch (err) {
+        this.logger.debug(() => `Failed Aliyun OAuth login: ${getDetailedErrorMessage(err)}`);
+        return AuthenticationResult.failed(err);
+      }
     }
+
+    // IAM/STS signed token path (original behavior)
+    if (signedToken) {
+      this.logger.debug('Performing Aliyun IAM/STS login.');
+
+      const authHeaders = {
+        'X-ES-IAM-Signed': signedToken,
+      };
+
+      try {
+        const user = await this.getUser(request, authHeaders);
+
+        this.logger.debug('Aliyun IAM login successful.');
+        return AuthenticationResult.succeeded(user, {
+          authHeaders,
+          state: { authorization: signedToken },
+        });
+      } catch (err) {
+        this.logger.debug(() => `Failed Aliyun IAM login: ${getDetailedErrorMessage(err)}`);
+        return AuthenticationResult.failed(err);
+      }
+    }
+
+    return AuthenticationResult.failed(new Error('No valid credentials provided'));
   }
 
   /**
@@ -92,7 +130,14 @@ export class AliyunAuthenticationProvider extends BaseAuthenticationProvider {
 
     if (state?.authorization) {
       try {
-        const authHeaders = { 'X-ES-IAM-Signed': state.authorization };
+        // Determine if this is an OAuth token (doesn't start with STS signature format)
+        // OAuth tokens are JWT-like, STS tokens are base64-encoded signatures
+        const isOAuthToken = state.authorization.includes('.') || state.authorization.startsWith('ey');
+
+        const authHeaders = isOAuthToken
+          ? { 'authorization': `Bearer ${state.authorization}` }
+          : { 'X-ES-IAM-Signed': state.authorization };
+
         const user = await this.getUser(request, authHeaders);
 
         this.logger.debug('Request has been authenticated via state.');

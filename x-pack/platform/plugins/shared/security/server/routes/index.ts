@@ -16,6 +16,7 @@ import type { PublicMethodsOf } from '@kbn/utility-types';
 import { defineAnalyticsRoutes } from './analytics';
 import { defineAnonymousAccessRoutes } from './anonymous_access';
 import { defineApiKeysRoutes } from './api_keys';
+import { defineAliyunRoleMappingsRoutes } from './aliyun_role_mappings';
 import { defineAuthenticationRoutes } from './authentication';
 import { defineAuthorizationRoutes } from './authorization';
 import { defineDeprecationsRoutes } from './deprecations';
@@ -75,6 +76,7 @@ export function defineRoutes(params: RouteDefinitionParams) {
   // In the serverless environment...
   if (params.buildFlavor !== 'serverless') {
     defineAnonymousAccessRoutes(params); // anonymous access is disabled
+    defineAliyunRoleMappingsRoutes(params); // Aliyun role mappings management
     defineDeprecationsRoutes(params); // deprecated kibana user roles are not applicable, these HTTP APIs are not needed
     defineIndicesRoutes(params); // the ES privileges form used to help define roles (only consumer) is disabled, so there is no need for these HTTP APIs
     defineRoleMappingRoutes(params); // role mappings are managed internally, based on configurations in control plane, these HTTP APIs are not needed

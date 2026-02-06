@@ -172,6 +172,32 @@ const providersConfigSchema = schema.object(
         ]),
       }
     ),
+    aliyun: getUniqueProviderSchema('aliyun', {
+      description: schema.string({
+        defaultValue: i18n.translate('xpack.security.loginWithAliyunLabel', {
+          defaultMessage: 'Log in with Aliyun',
+        }),
+      }),
+      hint: schema.string({
+        defaultValue: i18n.translate('xpack.security.loginWithAliyunHintLabel', {
+          defaultMessage: 'For Aliyun RAM users',
+        }),
+      }),
+      icon: schema.string({ defaultValue: 'logoCloud' }),
+      saml: schema.maybe(
+        schema.object({
+          appId: schema.string(),
+          realm: schema.maybe(schema.string()),
+        })
+      ),
+      oauth: schema.maybe(
+        schema.object({
+          clientId: schema.string(),
+          clientSecret: schema.maybe(schema.string()),
+          realm: schema.maybe(schema.string()),
+        })
+      ),
+    }),
   },
   {
     validate(config) {
@@ -265,6 +291,7 @@ export const ConfigSchema = schema.object({
         pki: undefined,
         kerberos: undefined,
         anonymous: undefined,
+        aliyun: undefined,
       },
     }),
     oidc: providerOptionsSchema('oidc', schema.object({ realm: schema.string() })),
@@ -273,6 +300,12 @@ export const ConfigSchema = schema.object({
       schema.object({
         realm: schema.maybe(schema.string()),
         maxRedirectURLSize: schema.maybe(schema.byteSize()),
+      })
+    ),
+    aliyun: providerOptionsSchema(
+      'aliyun',
+      schema.object({
+        realm: schema.maybe(schema.string()),
       })
     ),
     http: schema.object({
