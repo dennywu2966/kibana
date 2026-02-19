@@ -5,6 +5,8 @@
  * 2.0.
  */
 
+import { defineAliyunRoutes } from './aliyun';
+import { defineAliyunOAuthRoutes } from './aliyun_oauth';
 import { defineCommonRoutes } from './common';
 import { defineOIDCRoutes } from './oidc';
 import { defineSAMLRoutes } from './saml';
@@ -19,5 +21,10 @@ export function defineAuthenticationRoutes(params: RouteDefinitionParams) {
 
   if (params.config.authc.sortedProviders.some(({ type }) => type === 'oidc')) {
     defineOIDCRoutes(params);
+  }
+
+  if (params.config.authc.sortedProviders.some(({ type }) => type === 'aliyun')) {
+    defineAliyunRoutes(params);
+    defineAliyunOAuthRoutes(params);
   }
 }

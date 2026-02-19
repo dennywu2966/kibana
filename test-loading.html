@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Kibana Loading Test</title>
+</head>
+<body>
+    <h1>Kibana Loading Diagnostic</h1>
+    <div id="results"></div>
+
+    <h2>Testing Bootstrap Script:</h2>
+    <script>
+        function log(msg, status = 'info') {
+            const color = status === 'error' ? 'red' : status === 'success' ? 'green' : 'black';
+            document.getElementById('results').innerHTML += `<p style="color:${color}">${msg}</p>`;
+            console.log(msg);
+        }
+
+        log('Starting diagnostic...');
+
+        // Test 1: Can we fetch the bootstrap file?
+        log('Test 1: Fetching bootstrap-anonymous.js...');
+        fetch('/kibana/bootstrap-anonymous.js')
+            .then(r => {
+                log(`✓ Bootstrap file loaded: ${r.status} ${r.statusText}`, 'success');
+                return r.text();
+            })
+            .then(content => {
+                log(`✓ Bootstrap content size: ${content.length} bytes`, 'success');
+            })
+            .catch(e => {
+                log(`✗ Error loading bootstrap: ${e.message}`, 'error');
+            });
+
+        // Test 2: Can we fetch the login page HTML?
+        log('Test 2: Fetching login page...');
+        fetch('/kibana/login')
+            .then(r => {
+                log(`✓ Login page loaded: ${r.status}`, 'success');
+                return r.text();
+            })
+            .then(html => {
+                const hasBootstrap = html.includes('bootstrap-anonymous.js');
+                const hasPlaceholders = html.includes('XXXXXXXXXXXX');
+                log(`  - Has bootstrap script: ${hasBootstrap ? 'Yes' : 'No'}`, hasBootstrap ? 'success' : 'error');
+                log(`  - Has XXXXXXXX placeholders: ${hasPlaceholders ? 'Yes (normal in dev)' : 'No'}`, 'info');
+            })
+            .catch(e => {
+                log(`✗ Error loading login page: ${e.message}`, 'error');
+            });
+
+        // Test 3: Check browser console for errors
+        log('Test 3: Check browser console (F12) for any red errors', 'info');
+
+        // Test 4: Try to load the bootstrap script dynamically
+        log('Test 4: Loading bootstrap script dynamically...');
+        const script = document.createElement('script');
+        script.src = '/kibana/bootstrap-anonymous.js';
+        script.onload = () => log('✓ Bootstrap script executed successfully!', 'success');
+        script.onerror = () => log('✗ Bootstrap script failed to load!', 'error');
+        document.head.appendChild(script);
+    </script>
+
+    <h2>Manual Tests:</h2>
+    <ul>
+        <li>Open Browser Developer Tools (F12)</li>
+        <li>Check Console tab for red errors</li>
+        <li>Check Network tab - are any files failing to load? (red status codes)</li>
+        <li>Try accessing: <a href="/kibana/login" target="_blank">/kibana/login</a></li>
+    </ul>
+</body>
+</html>

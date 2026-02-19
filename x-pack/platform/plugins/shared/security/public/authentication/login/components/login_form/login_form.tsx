@@ -37,6 +37,7 @@ import { FormattedMessage } from '@kbn/i18n-react';
 
 import { LoginValidator } from './validate_login';
 import type { LoginSelector, LoginSelectorProvider } from '../../../../../common/login_state';
+import { AliyunLoginForm } from '../aliyun_login_form';
 
 export interface LoginFormProps {
   http: HttpStart;
@@ -77,6 +78,7 @@ export enum MessageType {
 export enum PageMode {
   Selector,
   Form,
+  Aliyun,
   LoginHelp,
 }
 
@@ -241,6 +243,8 @@ export class LoginForm extends Component<LoginFormProps, State> {
         return this.renderLoginForm();
       case PageMode.Selector:
         return this.renderSelector();
+      case PageMode.Aliyun:
+        return this.renderAliyunForm();
       case PageMode.LoginHelp:
         return this.renderLoginHelp();
     }
@@ -338,6 +342,36 @@ export class LoginForm extends Component<LoginFormProps, State> {
     );
   };
 
+  private renderAliyunForm = () => {
+    return (
+      <Fragment>
+        <AliyunLoginForm
+          http={this.props.http}
+          notifications={this.props.notifications}
+          onSuccess={() => {
+            // After successful Aliyun login, reload the page to establish session
+            window.location.reload();
+          }}
+        />
+        <EuiSpacer />
+        <EuiFlexGroup responsive={false} justifyContent="center">
+          <EuiFlexItem grow={false}>
+            <EuiButtonEmpty
+              data-test-subj="loginBackToSelector"
+              size="xs"
+              onClick={() => this.onPageModeChange(PageMode.Selector)}
+            >
+              <FormattedMessage
+                id="xpack.security.loginPage.loginSelectorLinkText"
+                defaultMessage="More login options"
+              />
+            </EuiButtonEmpty>
+          </EuiFlexItem>
+        </EuiFlexGroup>
+      </Fragment>
+    );
+  };
+
   private renderSelector = () => {
     const providers = this.props.selector.providers.filter((p) => p.showInSelector);
     return (
@@ -350,11 +384,16 @@ export class LoginForm extends Component<LoginFormProps, State> {
               key={provider.name}
               data-test-subj={`loginCard-${provider.type}/${provider.name}`}
               disabled={!this.isLoadingState(LoadingStateType.None)}
-              onClick={() =>
-                provider.usesLoginForm
-                  ? this.onPageModeChange(PageMode.Form)
-                  : this.loginWithSelector({ provider })
-              }
+              onClick={() => {
+                if (provider.usesLoginForm) {
+                  this.onPageModeChange(PageMode.Form);
+                } else if (provider.type === 'aliyun') {
+                  // Aliyun uses a custom form for entering signed token
+                  this.onPageModeChange(PageMode.Aliyun);
+                } else {
+                  this.loginWithSelector({ provider });
+                }
+              }}
               css={(theme) => cardCss(theme, loading)}
             >
               <EuiFlexGroup alignItems="center" gutterSize="m" responsive={false}>

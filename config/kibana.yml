@@ -8,22 +8,22 @@
 # Specifies the address to which the Kibana server will bind. IP addresses and host names are both valid values.
 # The default is 'localhost', which usually means remote machines will not be able to connect.
 # To allow connections from remote users, set this parameter to a non-loopback address.
-#server.host: "localhost"
+server.host: "0.0.0.0"
 
 # Enables you to specify a path to mount Kibana at if you are running behind a proxy.
 # Use the `server.rewriteBasePath` setting to tell Kibana if it should remove the basePath
 # from requests it receives, and to prevent a deprecation warning at startup.
 # This setting cannot end in a slash.
-#server.basePath: ""
+#server.basePath: "/kibana"
 
 # Specifies whether Kibana should rewrite requests that are prefixed with
 # `server.basePath` or require that they are rewritten by your reverse proxy.
 # Defaults to `false`.
-#server.rewriteBasePath: false
+#server.rewriteBasePath: true
 
 # Specifies the public URL at which Kibana is available for end users. If
 # `server.basePath` is configured this URL should end with the same basePath.
-#server.publicBaseUrl: ""
+server.publicBaseUrl: "http://47.236.247.55:5601"
 
 # The maximum payload size in bytes for incoming server requests.
 #server.maxPayload: 1048576
@@ -46,8 +46,8 @@
 # the username and password that the Kibana server uses to perform maintenance on the Kibana
 # index at startup. Your Kibana users still need to authenticate with Elasticsearch, which
 # is proxied through the Kibana server.
-#elasticsearch.username: "kibana_system"
-#elasticsearch.password: "pass"
+#elasticsearch.username: "elastic"
+#elasticsearch.password: "Summer11"
 
 # Kibana can also authenticate to Elasticsearch via "service account tokens".
 # Service account tokens are Bearer style tokens that replace the traditional username/password based configuration.
@@ -181,3 +181,26 @@
 # Maximum number of documents loaded by each shard to generate autocomplete suggestions.
 # This value must be a whole number greater than zero. Defaults to 100_000
 #unifiedSearch.autocomplete.valueSuggestions.terminateAfter: 100000
+# Aliyun IAM testing configuration - ES with HTTPS enabled
+elasticsearch.hosts: ["https://127.0.0.1:9200"]
+# Kibana's internal credentials for ES maintenance operations
+elasticsearch.username: "kibana_system"
+elasticsearch.password: "Summer11"
+# Disable SSL verification for development (use proper certs in production)
+elasticsearch.ssl.verificationMode: none
+elasticsearch.ssl.certificateAuthorities: [ "/home/denny/projects/es-9.2.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT/config/certs/ca.crt" ]
+#xpack.security.enabled: true
+
+# Configure Aliyun authentication provider with OAuth 2.1 SSO (PKCE - no client secret needed)
+# IMPORTANT: Aliyun has order: 0 (highest priority) for OAuth-first authentication
+xpack.security.authc.providers:
+  aliyun.aliyun:
+    order: 0
+    description: "Log in with Aliyun RAM"
+    oauth:
+      clientId: "4004069369666938196"
+  basic.basic:
+    order: 100
+
+# Disable internal API restriction for dev mode (allows login page to work)
+server.restrictInternalApis: false
