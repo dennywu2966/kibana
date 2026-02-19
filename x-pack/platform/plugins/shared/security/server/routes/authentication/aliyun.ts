@@ -5,8 +5,8 @@
  * 2.0.
  */
 
-import { parseNextURL } from '@kbn/std';
 import { schema } from '@kbn/config-schema';
+import { parseNextURL } from '@kbn/std';
 
 import type { RouteDefinitionParams } from '..';
 import { wrapIntoCustomErrorResponse } from '../../errors';
@@ -19,18 +19,24 @@ export function defineAliyunRoutes({
   router,
   getAuthenticationService,
   basePath,
+  config,
 }: RouteDefinitionParams) {
+  const getAliyunProviderName = () =>
+    config.authc.sortedProviders.find(({ type }) => type === 'aliyun')?.name ?? 'aliyun';
+
   router.post(
     {
       path: '/internal/security/aliyun/authenticate',
       security: {
         authz: {
           enabled: false,
-          reason: 'This route is used for authentication - it does not require existing authentication',
+          reason:
+            'This route is used for authentication - it does not require existing authentication',
         },
         authc: {
           enabled: false,
-          reason: 'This route is used for authentication - it does not require existing authentication',
+          reason:
+            'This route is used for authentication - it does not require existing authentication',
         },
       },
       validate: {
@@ -43,29 +49,18 @@ export function defineAliyunRoutes({
         access: 'public',
       },
     },
-    createLicensedRouteHandler(async (context, request, response) => {
+    createLicensedRouteHandler(async (_context, request, response) => {
       try {
         const { signedToken, currentURL } = request.body;
         const redirectURL = parseNextURL(currentURL, basePath.serverBasePath);
 
-        // Call ES with X-ES-IAM-Signed header to authenticate
-        const esClient = await context.core.elasticsearch.client;
-        const authResponse = await esClient.asCurrentUser.transport.request({
-          method: 'GET',
-          path: '/_security/_authenticate',
-          headers: {
-            'X-ES-IAM-Signed': signedToken,
-          },
-        });
-
         // Now establish Kibana session using the authentication service
         // We'll pass the authentication info to the Aliyun provider
         const authenticationResult = await getAuthenticationService().login(request, {
-          provider: { name: 'aliyun' },
+          provider: { name: getAliyunProviderName() },
           redirectURL,
           value: {
             signedToken,
-            authResponse,
           },
         });
 

@@ -85,13 +85,14 @@ export function defineCreateOrUpdateAliyunRoleMappingRoutes({
           }
         }
 
-        // Create ES role mapping with rules to match Aliyun user by ARN
+        // Create ES role mapping with rules to match Aliyun user by ARN.
+        // Cloud IAM realm populates `metadata.cloud_arn` in the authenticated principal metadata.
         const roleMappingBody = {
           enabled: true,
           roles: roles,
           rules: {
             all: [
-              { field: { 'metadata.aliyun_arn': arn } },
+              { field: { 'metadata.cloud_arn': arn } },
             ],
           },
           metadata: {
@@ -162,7 +163,7 @@ export function defineCreateOrUpdateAliyunRoleMappingRoutes({
           roles: roles,
           rules: {
             all: [
-              { field: { 'metadata.aliyun_arn': arn } },
+              { field: { 'metadata.cloud_arn': arn } },
             ],
           },
           metadata: {

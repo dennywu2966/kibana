@@ -10,8 +10,8 @@ import { errors } from '@elastic/elasticsearch';
 import type { ScopeableRequest } from '@kbn/core/server';
 import { elasticsearchServiceMock, httpServerMock } from '@kbn/core/server/mocks';
 
-import { mockAuthenticationProviderOptions } from './base.mock';
 import { AliyunAuthenticationProvider } from './aliyun';
+import { mockAuthenticationProviderOptions } from './base.mock';
 import { mockAuthenticatedUser } from '../../../common/model/authenticated_user.mock';
 import { securityMock } from '../../mocks';
 import { AuthenticationResult } from '../authentication_result';
@@ -61,11 +61,41 @@ describe('AliyunAuthenticationProvider', () => {
       expect(result.succeeded()).toBe(true);
       expect(result.user?.username).toBe(user.username);
       expect(result.authHeaders).toEqual(authHeaders);
-      expect(result.state).toEqual({ authorization: 'test-signed-token' });
+      expect(result.state).toEqual({
+        version: 2,
+        mode: 'iam',
+        authHeaders,
+      });
       expect(result.user?.authentication_provider).toEqual({
         type: 'aliyun',
         name: 'aliyun1',
       });
+
+      expectAuthenticateCall(mockOptions.client, { headers: authHeaders });
+    });
+
+    it('succeeds with OAuth access token and persists OAuth state marker', async () => {
+      const user = mockAuthenticatedUser();
+      const accessToken = 'opaque-oauth-token';
+      const loginAttempt = { accessToken, redirectURL: '/app/home' };
+      const authHeaders = { authorization: `Bearer ${accessToken}` };
+
+      const mockScopedClusterClient = elasticsearchServiceMock.createScopedClusterClient();
+      mockScopedClusterClient.asCurrentUser.security.authenticate.mockResponse(user);
+      mockOptions.client.asScoped.mockReturnValue(mockScopedClusterClient);
+
+      const result = await provider.login(
+        httpServerMock.createKibanaRequest({ headers: {} }),
+        loginAttempt
+      );
+
+      expect(result).toEqual(
+        AuthenticationResult.redirectTo('/app/home', {
+          user: { ...user, authentication_provider: { type: 'aliyun', name: 'aliyun1' } },
+          authHeaders,
+          state: { version: 2, mode: 'oauth', authHeaders },
+        })
+      );
 
       expectAuthenticateCall(mockOptions.client, { headers: authHeaders });
     });
@@ -132,31 +162,106 @@ describe('AliyunAuthenticationProvider', () => {
       await expect(
         provider.authenticate(httpServerMock.createKibanaRequest(), {})
       ).resolves.toEqual(
-        AuthenticationResult.redirectTo('/mock-server-basepath/login?next=%2Fmock-server-basepath%2Fpath')
+        AuthenticationResult.redirectTo(
+          '/mock-server-basepath/login?next=%2Fmock-server-basepath%2Fpath'
+        )
       );
     });
 
-    it('succeeds if only state is available.', async () => {
+    it('succeeds if v2 state is available.', async () => {
       const request = httpServerMock.createKibanaRequest({ headers: {} });
       const user = mockAuthenticatedUser();
-      const authorization = 'test-signed-token';
+      const authHeaders = { 'X-ES-IAM-Signed': 'test-signed-token' };
 
       const mockScopedClusterClient = elasticsearchServiceMock.createScopedClusterClient();
       mockScopedClusterClient.asCurrentUser.security.authenticate.mockResponse(user);
       mockOptions.client.asScoped.mockReturnValue(mockScopedClusterClient);
 
-      const result = await provider.authenticate(request, { authorization });
+      const result = await provider.authenticate(request, {
+        version: 2,
+        mode: 'iam',
+        authHeaders,
+      });
 
       // Check that authentication succeeded
       expect(result.succeeded()).toBe(true);
       expect(result.user?.username).toBe(user.username);
-      expect(result.authHeaders).toEqual({ 'X-ES-IAM-Signed': authorization });
+      expect(result.authHeaders).toEqual(authHeaders);
       expect(result.user?.authentication_provider).toEqual({
         type: 'aliyun',
         name: 'aliyun1',
       });
 
       expectAuthenticateCall(mockOptions.client, {
+        headers: authHeaders,
+      });
+    });
+
+    it('uses bearer auth when v2 state indicates OAuth mode.', async () => {
+      const request = httpServerMock.createKibanaRequest({ headers: {} });
+      const user = mockAuthenticatedUser();
+      const authorization = 'opaque-access-token-without-dots';
+      const authHeaders = { authorization: `Bearer ${authorization}` };
+
+      const mockScopedClusterClient = elasticsearchServiceMock.createScopedClusterClient();
+      mockScopedClusterClient.asCurrentUser.security.authenticate.mockResponse(user);
+      mockOptions.client.asScoped.mockReturnValue(mockScopedClusterClient);
+
+      const result = await provider.authenticate(request, {
+        version: 2,
+        mode: 'oauth',
+        authHeaders,
+      });
+
+      expect(result.succeeded()).toBe(true);
+      expect(result.authHeaders).toEqual(authHeaders);
+
+      expectAuthenticateCall(mockOptions.client, {
+        headers: authHeaders,
+      });
+    });
+
+    it('uses explicit legacy OAuth mode without trying IAM fallback.', async () => {
+      const request = httpServerMock.createKibanaRequest({ headers: {} });
+      const user = mockAuthenticatedUser();
+      const authorization = 'opaque-access-token';
+      const authHeaders = { authorization: `Bearer ${authorization}` };
+
+      const mockScopedClusterClient = elasticsearchServiceMock.createScopedClusterClient();
+      mockScopedClusterClient.asCurrentUser.security.authenticate.mockResponse(user);
+      mockOptions.client.asScoped.mockReturnValue(mockScopedClusterClient);
+
+      const result = await provider.authenticate(request, {
+        authorization,
+        authorizationType: 'oauth',
+      });
+
+      expect(result.succeeded()).toBe(true);
+      expect(result.authHeaders).toEqual(authHeaders);
+      expectAuthenticateCall(mockOptions.client, { headers: authHeaders });
+    });
+
+    it('tries OAuth then IAM for legacy state without explicit mode.', async () => {
+      const request = httpServerMock.createKibanaRequest({ headers: {} });
+      const user = mockAuthenticatedUser();
+      const authorization = 'legacy-token';
+
+      const mockScopedClusterClient = elasticsearchServiceMock.createScopedClusterClient();
+      const oauthError = new errors.ResponseError(securityMock.createApiResponse({ body: {} }));
+      mockScopedClusterClient.asCurrentUser.security.authenticate
+        .mockRejectedValueOnce(oauthError)
+        .mockResolvedValueOnce(user);
+      mockOptions.client.asScoped.mockReturnValue(mockScopedClusterClient);
+
+      const result = await provider.authenticate(request, { authorization });
+
+      expect(result.succeeded()).toBe(true);
+      expect(result.authHeaders).toEqual({ 'X-ES-IAM-Signed': authorization });
+      expect(mockOptions.client.asScoped).toHaveBeenCalledTimes(2);
+      expect(mockOptions.client.asScoped).toHaveBeenNthCalledWith(1, {
+        headers: { authorization: `Bearer ${authorization}` },
+      });
+      expect(mockOptions.client.asScoped).toHaveBeenNthCalledWith(2, {
         headers: { 'X-ES-IAM-Signed': authorization },
       });
     });
@@ -174,9 +279,9 @@ describe('AliyunAuthenticationProvider', () => {
       );
       mockOptions.client.asScoped.mockReturnValue(mockScopedClusterClient);
 
-      await expect(provider.authenticate(request, { authorization })).resolves.toEqual(
-        AuthenticationResult.failed(authenticationError)
-      );
+      await expect(
+        provider.authenticate(request, { authorization, authorizationType: 'iam' })
+      ).resolves.toEqual(AuthenticationResult.failed(authenticationError));
 
       expectAuthenticateCall(mockOptions.client, {
         headers: { 'X-ES-IAM-Signed': authorization },

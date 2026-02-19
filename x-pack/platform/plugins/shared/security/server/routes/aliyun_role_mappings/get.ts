@@ -12,6 +12,30 @@ import { wrapIntoCustomErrorResponse } from '../../errors';
 import { createLicensedRouteHandler } from '../licensed_route_handler';
 import type { AliyunRoleMapping } from './get_all';
 
+function extractArnFromRoleMapping(mapping: any): string | undefined {
+  const metadataArn = mapping?.metadata?.arn;
+  if (typeof metadataArn === 'string' && metadataArn.length > 0) {
+    return metadataArn;
+  }
+
+  const allRules = mapping?.rules?.all;
+  if (Array.isArray(allRules)) {
+    for (const rule of allRules) {
+      const field = rule?.field;
+      if (!field || typeof field !== 'object') {
+        continue;
+      }
+      const arnCandidate =
+        field['metadata.cloud_arn'] ?? field['metadata.aliyun_arn'] ?? field['metadata.arn'];
+      if (typeof arnCandidate === 'string' && arnCandidate.length > 0) {
+        return arnCandidate;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 export function defineGetAliyunRoleMappingRoutes({ router }: RouteDefinitionParams) {
   router.get(
     {
@@ -42,7 +66,8 @@ export function defineGetAliyunRoleMappingRoutes({ router }: RouteDefinitionPara
 
         // ES returns object where the key is the mapping name
         const mapping = mappingResult[id];
-        if (!mapping || !mapping.metadata?.arn) {
+        const arn = mapping ? extractArnFromRoleMapping(mapping) : undefined;
+        if (!mapping || !arn) {
           return response.notFound({
             body: {
               message: 'Aliyun role mapping not found',
@@ -53,7 +78,7 @@ export function defineGetAliyunRoleMappingRoutes({ router }: RouteDefinitionPara
         return response.ok({
           body: {
             id,
-            arn: mapping.metadata.arn,
+            arn,
             roles: mapping.roles || [],
             enabled: mapping.enabled,
             created_at: mapping.metadata?.created_at,

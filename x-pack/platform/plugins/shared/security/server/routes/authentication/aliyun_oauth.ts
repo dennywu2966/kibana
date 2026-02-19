@@ -5,44 +5,183 @@
  * 2.0.
  */
 
+import crypto from 'crypto';
+
 import { schema } from '@kbn/config-schema';
+import { isInternalURL } from '@kbn/std';
+
 import type { RouteDefinitionParams } from '..';
 import { wrapIntoCustomErrorResponse } from '../../errors';
 import { createLicensedRouteHandler } from '../licensed_route_handler';
-import { AliyunAuthenticationProvider } from '../../authentication/providers/aliyun';
 import { ROUTE_TAG_AUTH_FLOW, ROUTE_TAG_CAN_REDIRECT } from '../tags';
-import crypto from 'crypto';
+
+interface OAuthStatePayload {
+  v: 'v1';
+  codeVerifier: string;
+  redirectTo?: string;
+  createdAt: number;
+}
+
+interface OAuthConfigEntry {
+  providerName: string;
+  clientId: string;
+}
+
+interface OAuthTokenResponsePayload {
+  access_token: string;
+}
+
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const OAUTH_STATE_VERSION = 'v1';
+const OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 10_000;
 
 // Generate code verifier and challenge for PKCE
 function generatePKCE() {
   const codeVerifier = crypto.randomBytes(32).toString('base64url');
   const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
-  // Return with an ID that can be used to retrieve the verifier without state
-  const verifierId = crypto.randomBytes(16).toString('hex');
-  return { codeVerifier, codeChallenge, verifierId };
+  return { codeVerifier, codeChallenge };
 }
 
 // Aliyun OAuth 2.1 endpoints (PKCE - no client secret required)
 // Source: https://oauth.aliyun.com/.well-known/openid-configuration
 const ALIYUN_AUTHORIZATION_URL = 'https://signin.aliyun.com/oauth2/v1/auth';
 const ALIYUN_TOKEN_URL = 'https://oauth.aliyun.com/v1/token';
-const ALIYUN_USERINFO_URL = 'https://oauth.aliyun.com/v1/userinfo';
+const LEGACY_OAUTH_CALLBACK_PATH = '/kibana/internal/security/aliyun/oauth/callback';
+const API_OAUTH_CALLBACK_PATH = '/api/security/aliyun/oauth/callback';
 
-export function defineAliyunOAuthRoutes({ router, getAuthenticationService, config, basePath }: RouteDefinitionParams) {
-  // Store code verifiers in memory (in production, use Redis or similar)
-  const codeVerifiers = new Map<string, string>();
+export function defineAliyunOAuthRoutes({
+  router,
+  getAuthenticationService,
+  config,
+  basePath,
+  logger,
+}: RouteDefinitionParams) {
+  const routeLogger = logger.get('routes', 'authentication', 'aliyun_oauth');
 
-  // Get OAuth configuration from provider config
-  const getOAuthConfig = () => {
+  const getConfiguredCallbackPath = () => {
+    const redirectUriOverride = process.env.ALIYUN_OAUTH_REDIRECT_URI?.trim();
+    if (redirectUriOverride) {
+      try {
+        const parsed = new URL(redirectUriOverride);
+        if (parsed.pathname.startsWith('/')) {
+          return parsed.pathname;
+        }
+      } catch {
+        // fall through to path-based configuration
+      }
+    }
+
+    const configuredPath = process.env.ALIYUN_OAUTH_CALLBACK_PATH?.trim();
+    if (configuredPath?.startsWith('/')) {
+      return configuredPath;
+    }
+    return API_OAUTH_CALLBACK_PATH;
+  };
+
+  const getOAuthCallbackURL = () => {
+    const redirectUriOverride = process.env.ALIYUN_OAUTH_REDIRECT_URI?.trim();
+    if (redirectUriOverride) {
+      return redirectUriOverride;
+    }
+    return basePath.publicBaseUrl
+      ? `${basePath.publicBaseUrl}${getConfiguredCallbackPath()}`
+      : `http://127.0.0.1:5601${basePath.serverBasePath}${getConfiguredCallbackPath()}`;
+  };
+
+  const getOAuthCallbackPaths = () =>
+    Array.from(
+      new Set([getConfiguredCallbackPath(), API_OAUTH_CALLBACK_PATH, LEGACY_OAUTH_CALLBACK_PATH])
+    );
+
+  const getSafeRedirectTo = (redirectTo?: string) =>
+    redirectTo && isInternalURL(redirectTo, basePath.serverBasePath) ? redirectTo : undefined;
+
+  const createOAuthStateToken = (payload: OAuthStatePayload) => {
+    const serializedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+    const signature = crypto
+      .createHmac('sha256', config.encryptionKey)
+      .update(serializedPayload)
+      .digest('base64url');
+    return `${serializedPayload}.${signature}`;
+  };
+
+  const parseOAuthStateToken = (stateToken: string): OAuthStatePayload | undefined => {
+    const [serializedPayload, signature] = stateToken.split('.');
+    if (!serializedPayload || !signature) {
+      return undefined;
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', config.encryptionKey)
+      .update(serializedPayload)
+      .digest();
+
+    let receivedSignature: Buffer;
+    try {
+      receivedSignature = Buffer.from(signature, 'base64url');
+    } catch {
+      return undefined;
+    }
+
+    if (receivedSignature.length !== expectedSignature.length) {
+      return undefined;
+    }
+
+    if (!crypto.timingSafeEqual(receivedSignature, expectedSignature)) {
+      return undefined;
+    }
+
+    let parsedPayload: unknown;
+    try {
+      parsedPayload = JSON.parse(Buffer.from(serializedPayload, 'base64url').toString('utf8'));
+    } catch {
+      return undefined;
+    }
+
+    const payload = parsedPayload as Partial<OAuthStatePayload>;
+    if (
+      payload?.v !== OAUTH_STATE_VERSION ||
+      typeof payload.codeVerifier !== 'string' ||
+      typeof payload.createdAt !== 'number'
+    ) {
+      return undefined;
+    }
+
+    return {
+      v: OAUTH_STATE_VERSION,
+      codeVerifier: payload.codeVerifier,
+      redirectTo: typeof payload.redirectTo === 'string' ? payload.redirectTo : undefined,
+      createdAt: payload.createdAt,
+    };
+  };
+
+  const getAuthenticationErrorRedirectURL = (redirectTo?: string) => {
+    const safeRedirectTo = getSafeRedirectTo(redirectTo);
+    const nextQuery = safeRedirectTo ? `&next=${encodeURIComponent(safeRedirectTo)}` : '';
+    return `${basePath.serverBasePath}/login?msg=AUTHENTICATION_ERROR${nextQuery}`;
+  };
+
+  // Get OAuth configuration from provider config.
+  const getOAuthConfig = (): OAuthConfigEntry | undefined => {
     const aliyunProviders = config.authc.providers.aliyun;
     if (!aliyunProviders) return undefined;
 
-    // Get the first enabled Aliyun provider's oauth config
-    for (const [name, provider] of Object.entries(aliyunProviders)) {
-      if (provider.enabled && provider.oauth) {
-        return provider.oauth;
+    // Resolve OAuth config using the active provider chain order to keep route behavior
+    // aligned with authenticator/provider selection semantics.
+    for (const providerRef of config.authc.sortedProviders) {
+      if (providerRef.type !== 'aliyun') {
+        continue;
+      }
+
+      const provider = aliyunProviders[providerRef.name];
+      if (provider?.oauth?.clientId) {
+        return {
+          providerName: providerRef.name,
+          clientId: provider.oauth.clientId,
+        };
       }
     }
+
     return undefined;
   };
 
@@ -63,6 +202,7 @@ export function defineAliyunOAuthRoutes({ router, getAuthenticationService, conf
       validate: {
         query: schema.object({
           redirect_to: schema.maybe(schema.string()),
+          next: schema.maybe(schema.string()),
         }),
       },
       options: {
@@ -73,27 +213,29 @@ export function defineAliyunOAuthRoutes({ router, getAuthenticationService, conf
     },
     createLicensedRouteHandler(async (context, request, response) => {
       try {
-        const { redirect_to: redirectTo } = request.query;
+        const { redirect_to: redirectToParam, next: nextParam } = request.query;
+        const requestedRedirectTo = redirectToParam ?? nextParam;
+        const redirectTo = getSafeRedirectTo(requestedRedirectTo);
         const oauthConfig = getOAuthConfig();
 
-        if (!oauthConfig || !oauthConfig.clientId) {
-          throw new Error('Aliyun OAuth is not configured. Please set appId in kibana.yml');
+        if (!oauthConfig) {
+          throw new Error('Aliyun OAuth is not configured. Please set clientId in kibana.yml');
         }
 
         // Generate PKCE code verifier and challenge
-        const { codeVerifier, codeChallenge, verifierId } = generatePKCE();
+        const { codeVerifier, codeChallenge } = generatePKCE();
+        const statePayload: OAuthStatePayload = {
+          v: OAUTH_STATE_VERSION,
+          codeVerifier,
+          redirectTo,
+          createdAt: Date.now(),
+        };
 
-        // Use verifierId as the state - serves as both CSRF token and lookup key
-        const state = verifierId;
+        // Signed state token carries PKCE verifier and redirect metadata across instances.
+        const state = createOAuthStateToken(statePayload);
 
-        // Store the code verifier for later use (indexed by verifierId/state)
-        codeVerifiers.set(state, codeVerifier);
-
-        // Build redirect URI - if publicBaseUrl includes basePath, don't add serverBasePath
-        const hasBasePathInPublicUrl = basePath.publicBaseUrl && basePath.publicBaseUrl !== 'http://127.0.0.1:5601';
-        const redirectUri = hasBasePathInPublicUrl
-          ? `${basePath.publicBaseUrl}/api/security/aliyun/oauth/callback`
-          : `${basePath.publicBaseUrl || 'http://127.0.0.1:5601'}${basePath.serverBasePath}/api/security/aliyun/oauth/callback`;
+        // Build OAuth callback URI.
+        const redirectUri = getOAuthCallbackURL();
 
         // Build Aliyun OAuth 2.1 authorization URL with PKCE
         const authUrl = new URL(ALIYUN_AUTHORIZATION_URL);
@@ -105,7 +247,7 @@ export function defineAliyunOAuthRoutes({ router, getAuthenticationService, conf
         authUrl.searchParams.set('code_challenge', codeChallenge);
         authUrl.searchParams.set('code_challenge_method', 'S256');
 
-        // Add redirect_to as relay state
+        // Add redirect_to as relay state.
         if (redirectTo) {
           authUrl.searchParams.set('relay_state', redirectTo);
         }
@@ -122,150 +264,225 @@ export function defineAliyunOAuthRoutes({ router, getAuthenticationService, conf
     })
   );
 
-  // OAuth callback - handle authorization code
-  router.get(
-    {
-      path: '/api/security/aliyun/oauth/callback',
-      security: {
-        authc: {
-          enabled: false,
-          reason: 'This route handles OAuth callback',
-        },
-        authz: {
-          enabled: false,
-          reason: 'This route handles OAuth callback',
-        },
-      },
-      validate: {
-        query: schema.object({
-          code: schema.string(),
-          state: schema.maybe(schema.string()),
-        }),
-      },
-      options: {
-        access: 'public',
-        excludeFromOAS: true,
-        tags: [ROUTE_TAG_CAN_REDIRECT, ROUTE_TAG_AUTH_FLOW],
-      },
-    },
-    createLicensedRouteHandler(async (context, request, response) => {
-      try {
-        console.error('[ALIYUN_OAUTH_CALLBACK] Received callback request');
-        console.error('[ALIYUN_OAUTH_CALLBACK] Query params:', JSON.stringify(request.query));
-        const { code, state } = request.query;
-        console.error('[ALIYUN_OAUTH_CALLBACK] Code:', code ? 'present' : 'missing', 'State:', state);
-        const oauthConfig = getOAuthConfig();
-        console.error('[ALIYUN_OAUTH_CALLBACK] OAuth config:', oauthConfig ? 'present' : 'missing');
+  const oauthCallbackHandler = createLicensedRouteHandler(async (context, request, response) => {
+    let failureRedirectTo: string | undefined;
 
-        if (!oauthConfig) {
-          throw new Error('Aliyun OAuth is not configured');
-        }
+    try {
+      const {
+        code,
+        state,
+        relay_state: relayState,
+        error,
+        error_description: errorDescription,
+      } = request.query;
+      const relayStateRedirect = getSafeRedirectTo(relayState);
+      failureRedirectTo = relayStateRedirect;
 
-        // Retrieve the code verifier using state as key
-        // Aliyun should return the state parameter, but if not, we'll handle it gracefully
-        let codeVerifier: string | undefined;
-        if (state) {
-          codeVerifier = codeVerifiers.get(state);
-          codeVerifiers.delete(state); // Clean up immediately
-        }
+      const oauthConfig = getOAuthConfig();
 
-        // If no code verifier is available, we can't complete PKCE flow
-        // As a fallback, try without PKCE (some providers allow this for testing)
-        const usePKCE = !!codeVerifier;
-        if (!usePKCE) {
-          console.error('[ALIYUN_OAUTH_CALLBACK] Warning: State parameter missing, attempting token exchange without PKCE');
-        }
-
-        // Build redirect URI - if publicBaseUrl includes basePath, don't add serverBasePath
-        const hasBasePathInPublicUrl = basePath.publicBaseUrl && basePath.publicBaseUrl !== 'http://127.0.0.1:5601';
-        const redirectUri = hasBasePathInPublicUrl
-          ? `${basePath.publicBaseUrl}/api/security/aliyun/oauth/callback`
-          : `${basePath.publicBaseUrl || 'http://127.0.0.1:5601'}${basePath.serverBasePath}/api/security/aliyun/oauth/callback`;
-
-        // Exchange authorization code for access token
-        // Note: PKCE (code_verifier) is preferred but may not be available if state was lost
-        const tokenParams: Record<string, string> = {
-          grant_type: 'authorization_code',
-          code,
-          client_id: oauthConfig.clientId,
-          redirect_uri: redirectUri,
-        };
-
-        // Add code_verifier only if we have it (PKCE flow)
-        if (usePKCE && codeVerifier) {
-          tokenParams.code_verifier = codeVerifier;
-        }
-
-        const tokenResponse = await fetch(ALIYUN_TOKEN_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: new URLSearchParams(tokenParams),
-        });
-
-        if (!tokenResponse.ok) {
-          const errorText = await tokenResponse.text();
-          throw new Error(`Token exchange failed: ${tokenResponse.statusText} - ${errorText}`);
-        }
-
-        const tokenData = await tokenResponse.json();
-        const accessToken = tokenData.access_token;
-
-        // Get user info from Aliyun
-        const userResponse = await fetch(ALIYUN_USERINFO_URL, {
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-          },
-        });
-
-        if (!userResponse.ok) {
-          throw new Error(`Failed to get user info: ${userResponse.statusText}`);
-        }
-
-        const userInfo = await userResponse.json();
-
-        // Create Kibana session using Aliyun OAuth credentials
-        // Get redirect URL from relay_state query parameter (set during authorization)
-        const redirectURL = request.query.relay_state as string || `${basePath.publicBaseUrl || 'http://127.0.0.1:5601'}${basePath.serverBasePath}/`;
-
-        const authenticationResult = await getAuthenticationService().login(request, {
-          provider: { type: AliyunAuthenticationProvider.type },
-          value: {
-            accessToken,
-            userInfo,
-            redirectURL,
-          },
-        });
-
-        if (authenticationResult.failed()) {
-          return response.unauthorized({
-            body: {
-              message: authenticationResult.error && authenticationResult.error.message
-                ? `Authentication failed: ${authenticationResult.error.message}`
-                : 'Authentication failed',
-            },
-          });
-        }
-
-        // Follow OIDC pattern: use response.redirected() when authenticationResult.redirected() is true
-        // This ensures Hapi properly includes the session cookies in the redirect response
-        if (authenticationResult.redirected()) {
-          return response.redirected({
-            headers: { location: authenticationResult.redirectURL! },
-          });
-        }
-
-        // This should not happen with the current implementation, but handle it anyway
-        return response.unauthorized({
-          body: authenticationResult.error,
-        });
-      } catch (error) {
-        console.error('[ALIYUN_OAUTH_CALLBACK] ERROR caught in callback:', error);
-        console.error('[ALIYUN_OAUTH_CALLBACK] Error message:', error?.message);
-        console.error('[ALIYUN_OAUTH_CALLBACK] Error stack:', error?.stack);
-        return response.customError(wrapIntoCustomErrorResponse(error));
+      if (!oauthConfig) {
+        throw new Error('Aliyun OAuth is not configured');
       }
-    })
-  );
+
+      if (error) {
+        const message = errorDescription
+          ? `${error}: ${errorDescription}`
+          : `Aliyun OAuth failed: ${error}`;
+        routeLogger.warn(`Aliyun OAuth callback returned error: ${message}`);
+        return response.redirected({
+          headers: { location: getAuthenticationErrorRedirectURL(failureRedirectTo) },
+        });
+      }
+
+      if (!code) {
+        routeLogger.warn('Aliyun OAuth callback missing authorization code.');
+        return response.redirected({
+          headers: { location: getAuthenticationErrorRedirectURL(failureRedirectTo) },
+        });
+      }
+
+      if (!state) {
+        routeLogger.warn('Aliyun OAuth callback missing state.');
+        return response.redirected({
+          headers: { location: getAuthenticationErrorRedirectURL(failureRedirectTo) },
+        });
+      }
+
+      const stateEntry = parseOAuthStateToken(state);
+      if (!stateEntry) {
+        routeLogger.warn('Aliyun OAuth callback state token is invalid.');
+        return response.redirected({
+          headers: { location: getAuthenticationErrorRedirectURL(failureRedirectTo) },
+        });
+      }
+
+      failureRedirectTo = stateEntry.redirectTo || relayStateRedirect;
+
+      if (Date.now() - stateEntry.createdAt > OAUTH_STATE_TTL_MS) {
+        routeLogger.warn(`Aliyun OAuth callback state ${state.slice(0, 8)}... exceeded TTL.`);
+        return response.redirected({
+          headers: {
+            location: getAuthenticationErrorRedirectURL(failureRedirectTo),
+          },
+        });
+      }
+
+      // Build OAuth callback URI.
+      const redirectUri = getOAuthCallbackURL();
+
+      // Exchange authorization code for access token using PKCE.
+      const tokenParams: Record<string, string> = {
+        grant_type: 'authorization_code',
+        code,
+        client_id: oauthConfig.clientId,
+        redirect_uri: redirectUri,
+        code_verifier: stateEntry.codeVerifier,
+      };
+
+      const tokenExchangeAbortController = new AbortController();
+      const tokenExchangeTimeout = setTimeout(
+        () => tokenExchangeAbortController.abort(),
+        OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS
+      );
+
+      const tokenResponse = await fetch(ALIYUN_TOKEN_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams(tokenParams),
+        signal: tokenExchangeAbortController.signal,
+      }).finally(() => clearTimeout(tokenExchangeTimeout));
+
+      if (!tokenResponse.ok) {
+        const errorText = await tokenResponse.text().catch(() => '');
+        routeLogger.warn(
+          `Aliyun OAuth token exchange failed with status ${
+            tokenResponse.status
+          }: ${tokenResponse.statusText}${errorText ? ` - ${errorText}` : ''}`
+        );
+        return response.redirected({
+          headers: { location: getAuthenticationErrorRedirectURL(failureRedirectTo) },
+        });
+      }
+
+      let tokenData: unknown;
+      try {
+        tokenData = await tokenResponse.json();
+      } catch (parseError) {
+        routeLogger.warn(
+          `Aliyun OAuth token exchange returned non-JSON payload: ${
+            parseError instanceof Error ? parseError.message : String(parseError)
+          }`
+        );
+        return response.redirected({
+          headers: { location: getAuthenticationErrorRedirectURL(failureRedirectTo) },
+        });
+      }
+
+      const accessToken =
+        typeof tokenData === 'object' &&
+        tokenData !== null &&
+        'access_token' in tokenData &&
+        typeof (tokenData as OAuthTokenResponsePayload).access_token === 'string'
+          ? (tokenData as OAuthTokenResponsePayload).access_token
+          : undefined;
+
+      if (!accessToken) {
+        routeLogger.warn('Aliyun OAuth token exchange returned no access token.');
+        return response.redirected({
+          headers: {
+            location: getAuthenticationErrorRedirectURL(failureRedirectTo),
+          },
+        });
+      }
+
+      // Create Kibana session using Aliyun OAuth credentials.
+      const redirectURL =
+        stateEntry.redirectTo ||
+        relayStateRedirect ||
+        `${basePath.publicBaseUrl || 'http://127.0.0.1:5601'}${basePath.serverBasePath}/`;
+
+      const authenticationResult = await getAuthenticationService().login(request, {
+        provider: { name: oauthConfig.providerName },
+        value: {
+          accessToken,
+          redirectURL,
+        },
+      });
+
+      if (authenticationResult.failed()) {
+        routeLogger.warn(
+          `Aliyun OAuth authentication failed: ${
+            authenticationResult.error?.message ?? 'unknown authentication error'
+          }`
+        );
+        return response.redirected({
+          headers: {
+            location: getAuthenticationErrorRedirectURL(failureRedirectTo),
+          },
+        });
+      }
+
+      // Follow OIDC pattern: use response.redirected() when authenticationResult.redirected() is true
+      // This ensures Hapi properly includes the session cookies in the redirect response
+      if (authenticationResult.redirected()) {
+        return response.redirected({
+          headers: { location: authenticationResult.redirectURL! },
+        });
+      }
+
+      // This should not happen with the current implementation, but handle it anyway
+      routeLogger.warn('Aliyun OAuth authentication did not produce redirect result.');
+      return response.redirected({
+        headers: {
+          location: getAuthenticationErrorRedirectURL(failureRedirectTo),
+        },
+      });
+    } catch (error) {
+      routeLogger.error(
+        `Aliyun OAuth callback failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return response.redirected({
+        headers: { location: getAuthenticationErrorRedirectURL(failureRedirectTo) },
+      });
+    }
+  });
+
+  // OAuth callback - handle authorization code. Register both legacy and API callback paths.
+  for (const callbackPath of getOAuthCallbackPaths()) {
+    router.get(
+      {
+        path: callbackPath,
+        security: {
+          authc: {
+            enabled: false,
+            reason: 'This route handles OAuth callback',
+          },
+          authz: {
+            enabled: false,
+            reason: 'This route handles OAuth callback',
+          },
+        },
+        validate: {
+          query: schema.object(
+            {
+              code: schema.maybe(schema.string()),
+              state: schema.maybe(schema.string()),
+              relay_state: schema.maybe(schema.string()),
+              error: schema.maybe(schema.string()),
+              error_description: schema.maybe(schema.string()),
+            },
+            { unknowns: 'allow' }
+          ),
+        },
+        options: {
+          access: 'public',
+          excludeFromOAS: true,
+          tags: [ROUTE_TAG_CAN_REDIRECT, ROUTE_TAG_AUTH_FLOW],
+        },
+      },
+      oauthCallbackHandler
+    );
+  }
 }

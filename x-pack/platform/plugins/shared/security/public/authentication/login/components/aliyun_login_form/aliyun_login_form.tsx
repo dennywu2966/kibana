@@ -28,9 +28,7 @@ interface Props {
 }
 
 interface State {
-  message:
-    | { type: 'none' }
-    | { type: 'danger' | 'info'; content: string };
+  message: { type: 'none' } | { type: 'danger' | 'info'; content: string };
   isLoading: boolean;
 }
 
@@ -40,53 +38,16 @@ export class AliyunLoginForm extends Component<Props, State> {
     isLoading: false,
   };
 
-  componentDidMount() {
-    // Check if this is a callback from Aliyun OAuth
-    const urlParams = new URLSearchParams(window.location.search);
-    const code = urlParams.get('code');
-    const error = urlParams.get('error');
-
-    if (error) {
-      this.setState({
-        message: {
-          type: 'danger',
-          content: i18n.translate('xpack.security.login.aliyun.oauthError', {
-            defaultMessage: 'Authentication was cancelled or failed. Please try again.',
-          }),
-        },
-      });
-    } else if (code) {
-      // This is an OAuth callback, process it
-      this.handleOAuthCallback(code);
+  private getRedirectTarget = () => {
+    const params = new URLSearchParams(window.location.search);
+    const nextTarget = params.get('next');
+    if (nextTarget) {
+      return nextTarget;
     }
-  }
 
-  private handleOAuthCallback = async (code: string) => {
-    this.setState({ isLoading: true });
-
-    try {
-      await this.props.http.post('/api/security/aliyun/oauth/callback', {
-        query: {
-          code,
-          state: new URLSearchParams(window.location.search).get('state') || '/',
-        },
-      });
-
-      // If successful, the server will handle redirect
-      this.props.onSuccess();
-    } catch (err: any) {
-      this.setState({
-        isLoading: false,
-        message: {
-          type: 'danger',
-          content:
-            err?.body?.message ||
-            i18n.translate('xpack.security.login.aliyun.authenticationFailed', {
-              defaultMessage: 'Authentication failed. Please try again.',
-            }),
-        },
-      });
-    }
+    const currentTarget = window.location.pathname + window.location.search;
+    // Avoid redirecting back to the login page when we don't have a target yet.
+    return window.location.pathname.endsWith('/login') ? undefined : currentTarget;
   };
 
   private initiateOAuthLogin = async () => {
@@ -94,12 +55,12 @@ export class AliyunLoginForm extends Component<Props, State> {
 
     try {
       // Get the authorization URL from the server
-      const redirectTarget = window.location.pathname + window.location.search;
+      const redirectTarget = this.getRedirectTarget();
       const result = await this.props.http.get<{ authorizationUrl: string; state: string }>(
         '/api/security/aliyun/oauth/authorize',
         {
           query: {
-            redirect_to: redirectTarget !== '/login' ? redirectTarget : undefined,
+            redirect_to: redirectTarget,
           },
         }
       );

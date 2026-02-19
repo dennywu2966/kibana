@@ -8,6 +8,12 @@
 import type { KibanaRequest } from '@kbn/core/server';
 
 import { BaseAuthenticationProvider } from './base';
+import {
+  buildAliyunAuthHeaders,
+  buildAliyunProviderState,
+  getAliyunAuthCandidatesFromState,
+  type AliyunProviderState,
+} from './aliyun_state';
 import { NEXT_URL_QUERY_STRING_PARAMETER } from '../../../common/constants';
 import { getDetailedErrorMessage } from '../../errors';
 import { AuthenticationResult } from '../authentication_result';
@@ -20,19 +26,7 @@ import { DeauthenticationResult } from '../deauthentication_result';
 interface ProviderLoginAttempt {
   signedToken?: string;
   accessToken?: string;
-  userInfo?: any;
   redirectURL?: string;
-}
-
-/**
- * The state supported by the provider.
- */
-interface ProviderState {
-  /**
-   * Content of the IAM signed token that should be provided with every request to the
-   * Elasticsearch on behalf of the authenticated user.
-   */
-  authorization?: string;
 }
 
 /**
@@ -62,20 +56,17 @@ export class AliyunAuthenticationProvider extends BaseAuthenticationProvider {
    */
   public async login(
     request: KibanaRequest,
-    { signedToken, accessToken, userInfo, redirectURL }: ProviderLoginAttempt,
-    state?: ProviderState | null
+    { signedToken, accessToken, redirectURL }: ProviderLoginAttempt,
+    state?: AliyunProviderState | null
   ) {
     this.logger.debug('Trying to perform Aliyun login.');
 
     // OAuth token path - use the access token obtained from OAuth flow
     if (accessToken) {
       this.logger.debug('Performing Aliyun OAuth login.');
-      this.logger.info(`[DEBUG] OAuth Access Token: ${accessToken}`);
 
-      // OAuth tokens must be sent via Authorization header, not X-ES-IAM-Signed
-      const authHeaders = {
-        'authorization': `Bearer ${accessToken}`,
-      };
+      const credential = { mode: 'oauth', accessToken } as const;
+      const authHeaders = buildAliyunAuthHeaders(credential);
 
       try {
         const user = await this.getUser(request, authHeaders);
@@ -87,7 +78,7 @@ export class AliyunAuthenticationProvider extends BaseAuthenticationProvider {
         return AuthenticationResult.redirectTo(finalRedirectURL, {
           user,
           authHeaders,
-          state: { authorization: accessToken },
+          state: buildAliyunProviderState(credential),
         });
       } catch (err) {
         this.logger.debug(() => `Failed Aliyun OAuth login: ${getDetailedErrorMessage(err)}`);
@@ -99,9 +90,8 @@ export class AliyunAuthenticationProvider extends BaseAuthenticationProvider {
     if (signedToken) {
       this.logger.debug('Performing Aliyun IAM/STS login.');
 
-      const authHeaders = {
-        'X-ES-IAM-Signed': signedToken,
-      };
+      const credential = { mode: 'iam', signedToken } as const;
+      const authHeaders = buildAliyunAuthHeaders(credential);
 
       try {
         const user = await this.getUser(request, authHeaders);
@@ -109,7 +99,7 @@ export class AliyunAuthenticationProvider extends BaseAuthenticationProvider {
         this.logger.debug('Aliyun IAM login successful.');
         return AuthenticationResult.succeeded(user, {
           authHeaders,
-          state: { authorization: signedToken },
+          state: buildAliyunProviderState(credential),
         });
       } catch (err) {
         this.logger.debug(() => `Failed Aliyun IAM login: ${getDetailedErrorMessage(err)}`);
@@ -125,27 +115,32 @@ export class AliyunAuthenticationProvider extends BaseAuthenticationProvider {
    * @param request Request instance.
    * @param [state] Optional state object associated with the provider.
    */
-  public async authenticate(request: KibanaRequest, state?: ProviderState | null) {
+  public async authenticate(request: KibanaRequest, state?: AliyunProviderState | null) {
     this.logger.debug(`Aliyun authenticate: ${request.url.pathname}`);
 
-    if (state?.authorization) {
-      try {
-        // Determine if this is an OAuth token (doesn't start with STS signature format)
-        // OAuth tokens are JWT-like, STS tokens are base64-encoded signatures
-        const isOAuthToken = state.authorization.includes('.') || state.authorization.startsWith('ey');
+    const authCandidates = getAliyunAuthCandidatesFromState(state);
+    if (authCandidates.length > 0) {
+      let latestError: unknown;
+      for (const candidate of authCandidates) {
+        try {
+          const { authHeaders } = candidate;
+          const user = await this.getUser(request, authHeaders);
 
-        const authHeaders = isOAuthToken
-          ? { 'authorization': `Bearer ${state.authorization}` }
-          : { 'X-ES-IAM-Signed': state.authorization };
-
-        const user = await this.getUser(request, authHeaders);
-
-        this.logger.debug('Request has been authenticated via state.');
-        return AuthenticationResult.succeeded(user, { authHeaders });
-      } catch (err) {
-        this.logger.debug(() => `Aliyun auth failed: ${getDetailedErrorMessage(err)}`);
-        return AuthenticationResult.failed(err);
+          this.logger.debug('Request has been authenticated via state.');
+          return AuthenticationResult.succeeded(user, { authHeaders });
+        } catch (err) {
+          latestError = err;
+          this.logger.debug(
+            () => `Aliyun ${candidate.mode} auth failed: ${getDetailedErrorMessage(err)}`
+          );
+        }
       }
+
+      if (latestError instanceof Error) {
+        return AuthenticationResult.failed(latestError);
+      }
+
+      return AuthenticationResult.failed(new Error('Aliyun authentication failed'));
     }
 
     // If state isn't present let's redirect user to the login page.
@@ -167,7 +162,7 @@ export class AliyunAuthenticationProvider extends BaseAuthenticationProvider {
    * @param request Request instance.
    * @param [state] Optional state object associated with the provider.
    */
-  public async logout(request: KibanaRequest, state?: ProviderState | null) {
+  public async logout(request: KibanaRequest, state?: AliyunProviderState | null) {
     this.logger.debug(`Trying to log user out via ${request.url.pathname}${request.url.search}.`);
 
     // Having a `null` state means that provider was specifically called to do a logout, but when

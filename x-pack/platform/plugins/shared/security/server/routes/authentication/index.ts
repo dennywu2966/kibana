@@ -5,20 +5,15 @@
  * 2.0.
  */
 
+import { defineAliyunRoutes } from './aliyun';
+import { defineAliyunOAuthRoutes } from './aliyun_oauth';
 import { defineCommonRoutes } from './common';
 import { defineOIDCRoutes } from './oidc';
 import { defineSAMLRoutes } from './saml';
-import { defineAliyunRoutes } from './aliyun';
-import { defineAliyunOAuthRoutes } from './aliyun_oauth';
 import type { RouteDefinitionParams } from '..';
 
 export function defineAuthenticationRoutes(params: RouteDefinitionParams) {
   defineCommonRoutes(params);
-
-  // Debug logging to see which providers are configured
-  const providers = params.config.authc.sortedProviders;
-  const providerInfo = providers.map(p => `${p.type}/${p.name}`).join(', ');
-  console.error(`[Security Routes] Configured providers: ${providerInfo}`);
 
   if (params.config.authc.sortedProviders.some(({ type }) => type === 'saml')) {
     defineSAMLRoutes(params);
@@ -29,7 +24,6 @@ export function defineAuthenticationRoutes(params: RouteDefinitionParams) {
   }
 
   if (params.config.authc.sortedProviders.some(({ type }) => type === 'aliyun')) {
-    console.error('[Security Routes] Registering Aliyun routes');
     defineAliyunRoutes(params);
     defineAliyunOAuthRoutes(params);
   }
